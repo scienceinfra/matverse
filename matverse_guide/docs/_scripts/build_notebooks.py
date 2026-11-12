@@ -35,6 +35,7 @@ NOTEBOOKS = [
     "indentation",
     "fracture",
     "phase_quantification",
+    "exafs",
     "data_io",
     "infrastructure",
 ]

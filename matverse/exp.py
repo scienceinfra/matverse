@@ -751,3 +751,326 @@ def qpa_amorphous(md: AnnData, specimens, radiation="CuKa", *,
 
 
 __all__ += ["qpa", "fit_pattern", "qpa_amorphous"]
+
+
+# ---------------------------------------------------------------- EXAFS
+# Numerics in matverse/_exafs.py. Plain functions of arrays / files (no
+# AnnData): EXAFS shell fitting is a per-spectrum inverse problem whose inputs
+# are FEFF paths and chi(k), not a table of materials.
+
+_EXAFS_COLUMNS = ["sample_id", "path_id", "coordination_number", "coordination_number_err",
+                  "distance_angstrom", "distance_angstrom_err", "sigma2_angstrom2",
+                  "sigma2_angstrom2_err", "delta_e0_ev", "delta_e0_ev_err"]
+
+
+def _exafs_library(paths, sites=None, foil_compound=None, base_dir=None):
+    from . import _exafs as X
+    if isinstance(paths, X.Library):
+        if (sites and tuple(sites) != paths.sites) or (foil_compound and foil_compound != paths.foil_compound):
+            raise ValueError("pass sites / foil_compound to mv.exp.exafs_paths, not again here")
+        return paths
+    return X.Library(paths, base_dir=base_dir, sites=tuple(sites or ()), foil_compound=foil_compound)
+
+
+def _exafs_foil(foil):
+    from . import _exafs as X
+    if isinstance(foil, dict) and "k" in foil:
+        return X._spectrum_dict(foil)
+    if isinstance(foil, (tuple, list)):
+        return X._spectrum_dict(foil)
+    import pandas as pd
+    df = foil if isinstance(foil, pd.DataFrame) else pd.read_csv(foil)
+    low = {c.lower().strip(): c for c in df.columns}
+    kc = next(low[c] for c in ("k_inv_angstrom", "k", "wavenumber") if c in low)
+    sc = next((low[c] for c in ("sigma", "chi_err", "uncertainty") if c in low), None)
+    return X._spectrum_dict({"k": df[kc].to_numpy(float), "chi": df[low["chi"]].to_numpy(float),
+                             "sigma": None if sc is None else df[sc].to_numpy(float)})
+
+
+@register_function(
+    aliases=["feff path catalog", "exafs scattering paths", "feff.dat library",
+             "read feff paths", "exafs standards", "path equivalence groups"],
+    category="exp",
+    description="Load a catalog of FEFF scattering paths (feff.dat files plus "
+                "path id, equivalence group, scatterers, nleg, degeneracy, "
+                "reff, source compound) into the path library every other "
+                "mv.exp.exafs_* function uses; declares which compounds are "
+                "rigid sites (shell ratios fixed by the structure, focusing "
+                "multiple scattering tied) and which compound is the foil.",
+    examples=["lib = mv.exp.exafs_paths('data/path_catalog.csv', "
+              "sites=['<molecular-site compound>'], foil_compound='<foil compound>')",
+              "lib.table  # one row per path: kind, group, compound, tied partner"],
+    related=["mv.exp.exafs_s02", "mv.exp.exafs_series", "mv.exp.exafs_fit"],
+    notes="Column names are matched loosely (path_id/id, file, group, "
+          "scatterers, nleg, degeneracy/degen, reff_angstrom/reff, "
+          "source_compound/compound); relative files resolve against the "
+          "catalog's folder. Missing group defaults to the scatterer element. "
+          "Each multiple-scattering path is tied to the outermost single-"
+          "scattering path of its compound that it visits. A site bundle joins "
+          "a compound's first two single-scattering shells (same scatterer "
+          "class) with the degeneracy ratio fixed; for a site the outer shell "
+          "is then only fitted inside the bundle. Choose sites from the "
+          "catalog's provenance (a molecular / single-site moiety), never "
+          "from the expected answer.",
+)
+def exafs_paths(catalog, *, sites=None, foil_compound=None, base_dir=None):
+    """Path library from a catalog (CSV, DataFrame or list of dicts)."""
+    import pandas as pd
+    lib = _exafs_library(catalog, sites, foil_compound, base_dir)
+    rows = []
+    for pid, inf in lib.info.items():
+        partner = next((ss for ss, ms in lib.partner.items() if pid in ms), None)
+        rows.append({**inf, "kind": lib.kind[pid], "tied_to": partner,
+                     "site_only": pid in lib.site_only})
+    lib.table = pd.DataFrame(rows).sort_values("reff").reset_index(drop=True)
+    return lib
+
+
+@register_function(
+    aliases=["s02 from foil", "amplitude reduction factor", "S0^2 calibration",
+             "reference foil fit", "exafs s02"],
+    category="exp",
+    description="Amplitude reduction factor S0^2 from a reference (foil) "
+                "chi(k) whose coordination numbers are known: joint "
+                "k-weight R-space fit of its shells with N fixed, one edge "
+                "shift, per-shell R and sigma^2, error from the covariance "
+                "scaled by sqrt(reduced chi^2) over independent points.",
+    examples=["lib = mv.exp.exafs_paths('path_catalog.csv', foil_compound='<foil compound>')",
+              "cal = mv.exp.exafs_s02('reference_foil.csv', lib)  # N = degeneracy of the foil's first two shells",
+              "cal['s02'], cal['s02_err']"],
+    related=["mv.exp.exafs_paths", "mv.exp.exafs_series"],
+    notes="coordination={path_id: N} overrides the default (the foil "
+          "compound's first n_shells single-scattering paths with N = their "
+          "crystallographic degeneracy). Also stores each shell's foil sigma^2 "
+          "on the library: a metal phase in a sample is never more ordered "
+          "than the bulk foil measured under the same conditions.",
+)
+def exafs_s02(foil, paths, *, coordination=None, compound=None, n_shells: int = 2,
+              kmin: float = 3.0, kmax: float | None = None, rmin: float = 1.5,
+              rmax: float = 3.0, kweights=(1, 2, 3), window_dk: float = 1.0):
+    """S0^2 (and its scaled 1-sigma error) from a reference of known N."""
+    from . import _exafs as X
+    lib = _exafs_library(paths)
+    f = _exafs_foil(foil)
+    if coordination is None:
+        comp = compound or lib.foil_compound
+        if not comp:
+            raise ValueError("give coordination={path_id: N} or the foil compound")
+        coordination = X.default_foil_coordination(lib, comp, n_shells)
+    opt = X.make_options(kweights=tuple(kweights), window_dk=window_dk)
+    if kmax is None:
+        kmax = float(f["k"][f["observed"]].max()) - 0.5
+    return X.calibrate_s02(lib, f["k"], f["chi"], f["sigma"], coordination, opt,
+                           kmin=kmin, kmax=kmax, rmin=rmin, rmax=rmax)
+
+
+def _exafs_table(rows):
+    import pandas as pd
+    return pd.DataFrame(rows, columns=_EXAFS_COLUMNS)
+
+
+@register_function(
+    aliases=["exafs shell selection", "exafs model selection", "which shells are supported",
+             "exafs series fit", "feffit many samples", "exafs phase fraction",
+             "site fraction from exafs", "coordination numbers from exafs"],
+    category="exp",
+    description="Whole EXAFS campaign: S0^2 from the foil, then for every "
+                "chi(k) the shells the data support, chosen from a FEFF path "
+                "catalog (stepwise addition in a widening R window judged by "
+                "BIC, detection / resolution / bound rules, likelihood-ratio "
+                "clean-up, standard swaps within equivalence groups, "
+                "overlapping edge-shift windows), joint k-weights 1-3 in R "
+                "space, errors scaled by sqrt(reduced chi^2) and propagated "
+                "through ties; then the series reading: site-free samples are "
+                "references for their phase and every sample is re-read as "
+                "site + reference phase with mass balance, giving site "
+                "fractions.",
+    examples=["lib = mv.exp.exafs_paths('path_catalog.csv', sites=['<site compound>'], "
+              "foil_compound='<foil compound>')",
+              "res = mv.exp.exafs_series('spectra.csv', lib, foil='reference_foil.csv', "
+              "kmin=3, rmin=1, rmax=4, n_jobs=4)",
+              "res['table']  # one row per path: N, R, sigma2, dE0 with 1-sigma errors",
+              "res['s02'], res['site_fraction'], res['samples']['S1']['reading']"],
+    related=["mv.exp.exafs_paths", "mv.exp.exafs_s02", "mv.exp.exafs_fit",
+             "mv.exp.exafs_agreement", "mv.exp.exafs_shells"],
+    notes="spectra: long CSV / DataFrame (sample_id, k, chi, sigma, observed) "
+          "or {sample: {'k','chi','sigma','observed'}} on a uniform k grid; "
+          "unobserved points (glitches) are bridged by straight lines in data "
+          "and model. sigma missing -> estimated from |FT| at 15-25 A. Pass "
+          "the window and bounds the analysis must respect (kmin, kmax, "
+          "window_dk, rmin, rmax, kweights, n_bounds, dr_max, s2_bounds, "
+          "e0_bounds); other selection rules are documented in "
+          "matverse._exafs.Options and overridable by keyword. Runtime grows "
+          "with catalog size x samples x edge-shift windows (tens of minutes "
+          "for ~40 paths x 6 spectra on 4 CPUs): run it ONCE, in the "
+          "background if the tool has a time limit, and save the result. "
+          "series=False skips the mixture reading. site_fraction = the site "
+          "first-shell N over its degeneracy (0 when the site is absent).",
+)
+def exafs_series(spectra, paths, *, foil=None, s02=None, s02_err=None, coordination=None,
+                 series: bool = True, n_jobs: int | None = None, verbose: bool = True,
+                 foil_window: dict | None = None, **options):
+    """Shell selection for each spectrum and the series reading; dict out."""
+    from . import _exafs as X
+    lib = _exafs_library(paths)
+    opt = X.make_options(**options)
+    import functools
+    log = functools.partial(print, flush=True) if verbose else (lambda *a, **k: None)
+    cal = None
+    if foil is not None:
+        fw = dict(kmin=opt.kmin, rmin=1.5, rmax=3.0)
+        fw.update(foil_window or {})
+        cal = exafs_s02(foil, lib, coordination=coordination, kweights=opt.kweights,
+                        window_dk=opt.window_dk, **fw)
+        log(f"[exafs] S0^2 = {cal['s02']:.4f} +- {cal['s02_err']:.4f} from the foil "
+            f"({', '.join(cal['paths'])})")
+        if s02 is None:
+            s02, s02_err = cal["s02"], cal["s02_err"]
+    if s02 is None:
+        raise ValueError("give foil= (S0^2 is calibrated on it) or s02=")
+    spec = X.load_spectra(spectra)
+    n_jobs = X.available_cpus() if n_jobs is None else int(n_jobs)
+    rows, info = X.campaign(lib, spec, opt, float(s02), n_jobs=n_jobs, series=series, log=log)
+    table = _exafs_table(rows)
+    agree = {}
+    for sid, s in spec.items():
+        mine = table[table.sample_id == sid]
+        model = X.rows_chi(lib, zip(mine.path_id, mine.coordination_number, mine.distance_angstrom,
+                                    mine.sigma2_angstrom2, mine.delta_e0_ev), s["k"], float(s02))
+        agree[sid] = X.agreement(s["k"], np.where(s["observed"], s["chi"], np.nan), model, s["observed"],
+                                 s["sigma"], kmin=opt.kmin, kmax=info[sid]["kmax"], window_dk=opt.window_dk,
+                                 rmin=opt.rmin, rmax=opt.rmax, kweights=opt.kweights)
+        info[sid]["agreement"] = agree[sid]
+    fractions = {sid: (next(iter(v["site_fraction"].values())) if len(v["site_fraction"]) == 1
+                       else v["site_fraction"]) for sid, v in info.items()}
+    if verbose:
+        for sid, v in info.items():
+            log(f"[exafs] {sid}: {v['reading']} model, {int((table.sample_id == sid).sum())} paths, "
+                f"chi2_nu={v['redchi']:.2f}, site fraction {fractions[sid]}, "
+                f"R-space misfit {agree[sid]['rspace']:.4f}")
+    return {"table": table, "s02": float(s02), "s02_err": None if s02_err is None else float(s02_err),
+            "site_fraction": fractions, "samples": info, "foil": cal, "library": lib,
+            "options": {k: getattr(opt, k) for k in opt.__dataclass_fields__}}
+
+
+@register_function(
+    aliases=["feffit", "fit exafs model", "exafs path fit", "fit given shells",
+             "exafs fit with errors"],
+    category="exp",
+    description="Fit ONE stated model to one chi(k): a list of terms (a path "
+                "id, a path tied to its multiple-scattering partner "
+                "'<path>+ms', or a site bundle 'site:<compound>'), joint "
+                "k-weights in R space, one edge shift, bounds, 1-sigma errors "
+                "from the covariance scaled by sqrt(reduced chi^2), tied "
+                "members carrying the propagated error.",
+    examples=["fit = mv.exp.exafs_fit(spectra['S1'], lib, ['<path A>', 'site:<compound>'], s02=0.85)",
+              "fit['table'], fit['redchi'], fit['bic'], fit['agreement']"],
+    related=["mv.exp.exafs_series", "mv.exp.exafs_agreement"],
+    notes="Use it to test a hypothesis the selection did not consider, or to "
+          "compare two models by BIC / likelihood ratio (fit['chi2'], "
+          "fit['n_params'], fit['n_idp']). spectrum: {'k','chi','sigma',"
+          "'observed'} or (k, chi[, sigma]).",
+)
+def exafs_fit(spectrum, paths, model, s02: float, *, e0: float = 0.0, sample_id: str = "sample",
+              **options):
+    """Fit a stated list of terms; dict with table, chi2, redchi, bic."""
+    from . import _exafs as X
+    lib = _exafs_library(paths)
+    opt = X.make_options(**options)
+    s = X._spectrum_dict(spectrum)
+    ctx = X.Context(sample_id, lib, s["k"], s["chi"], s["sigma"], s["observed"], opt)
+    terms = []
+    for spec in model:
+        if spec.startswith("site:"):
+            comp = spec.split(":", 1)[1]
+            terms.append(next(b for b in lib.bundles if lib.info[b[0][0]]["compound"] == comp))
+        elif spec.endswith("+ms"):
+            ss = spec[:-3]
+            t = ((ss, 1.0, 0),)
+            for ms in lib.partner.get(ss, []):
+                t += ((ms, lib.paths[ms]["degen"] / lib.paths[ss]["degen"], 0),)
+            terms.append(t)
+        else:
+            if spec not in lib.paths:
+                raise ValueError(f"unknown path {spec!r}")
+            terms.append(((spec, 1.0, 0),))
+    best = None
+    for dr in (-0.04, 0.0, 0.04):
+        for e in sorted({float(e0)} | set(opt.e0_starts)):
+            x0 = [v for t in terms for v in lib.start(t, dr)] + [e]
+            f, res, tr = X.fit_terms(ctx, tuple(terms), x0, s02, max_nfev=3000, want_res=True)
+            if best is None or f.chi2 < best[0].chi2:
+                best = (f, res, tr)
+    fit, res, tr = best
+    err = X.scaled_errors(res, tr)
+    prow = X.phase_rows(lib, fit, err)
+    rows = [(sample_id, m, n, dn, r, dr_, s2, ds2, float(fit.x[-1]), float(err[-1]))
+            for m, n, dn, r, dr_, s2, ds2 in prow]
+    table = _exafs_table(rows)
+    model_chi = X.model_chi(ctx, fit.terms, fit.x, s02)
+    npar = X.n_params(fit, lib)
+    return {"table": table, "chi2": fit.chi2, "n_params": npar, "n_idp": float(tr.n_idp),
+            "redchi": fit.chi2 / max(tr.n_idp - npar, 1.0),
+            "bic": float(X.bic(fit, tr.n_idp, lib)), "physical": X.physical(fit, lib, opt),
+            "agreement": X.agreement(s["k"], np.where(s["observed"], s["chi"], np.nan), model_chi,
+                                     s["observed"], s["sigma"], kmin=opt.kmin, kmax=ctx.kmax,
+                                     window_dk=opt.window_dk, rmin=opt.rmin, rmax=opt.rmax,
+                                     kweights=opt.kweights),
+            "model_chi": model_chi, "k": s["k"]}
+
+
+@register_function(
+    aliases=["exafs residual", "exafs r-factor", "exafs goodness of fit",
+             "chi(k) model check", "r-space misfit"],
+    category="exp",
+    description="Agreement between a chi(k) and a model given as path rows: "
+                "normalised k-space residual per k-weight on observed points "
+                "and the complex R-space residual |F_model - F_data| / "
+                "|F_data| (sin^2-tapered window, gaps bridged in both).",
+    examples=["mv.exp.exafs_agreement(spectra['S1'], res['table'][res['table'].sample_id == 'S1'], lib, s02=res['s02'])"],
+    related=["mv.exp.exafs_series", "mv.exp.exafs_fit"],
+    notes="rows: DataFrame with path_id, coordination_number, "
+          "distance_angstrom, sigma2_angstrom2, delta_e0_ev (the exafs_series "
+          "table layout).",
+)
+def exafs_agreement(spectrum, rows, paths, s02: float, *, kmin: float = 3.0, kmax: float | None = None,
+                    window_dk: float = 1.0, rmin: float = 1.0, rmax: float = 4.0, kweights=(1, 2, 3)):
+    """k-space residuals per k-weight and the R-space residual."""
+    from . import _exafs as X
+    lib = _exafs_library(paths)
+    s = X._spectrum_dict(spectrum)
+    model = X.rows_chi(lib, zip(rows["path_id"], rows["coordination_number"], rows["distance_angstrom"],
+                                rows["sigma2_angstrom2"], rows["delta_e0_ev"]), s["k"], float(s02))
+    return X.agreement(s["k"], np.where(s["observed"], s["chi"], np.nan), model, s["observed"], s["sigma"],
+                       kmin=kmin, kmax=kmax, window_dk=window_dk, rmin=rmin, rmax=rmax,
+                       kweights=tuple(kweights))
+
+
+@register_function(
+    aliases=["exafs shell aggregation", "merge paths into shells", "effective sigma2",
+             "shell coordination number"],
+    category="exp",
+    description="Aggregate one sample's path rows into shells: rows of one "
+                "equivalence group whose sorted distances differ by less than "
+                "a link distance form a shell with total N, N-weighted R and "
+                "effective sigma^2 (disorder plus spread), errors propagated "
+                "to first order.",
+    examples=["mv.exp.exafs_shells(res['table'], lib, link=0.25)"],
+    related=["mv.exp.exafs_series"],
+)
+def exafs_shells(table, paths, *, link: float = 0.25):
+    """Shells per sample from an exafs table."""
+    import pandas as pd
+    from . import _exafs as X
+    lib = _exafs_library(paths)
+    out = []
+    for sid, sub in table.groupby("sample_id", sort=True):
+        rows = [{"path_id": r.path_id, "N": r.coordination_number, "N_err": r.coordination_number_err,
+                 "R": r.distance_angstrom, "R_err": r.distance_angstrom_err, "sigma2": r.sigma2_angstrom2,
+                 "sigma2_err": r.sigma2_angstrom2_err} for r in sub.itertuples()]
+        for sh in X.merge_shells(rows, lib, link):
+            out.append({"sample_id": sid, **sh, "paths": ",".join(sh["paths"])})
+    return pd.DataFrame(out)
+
+
+__all__ += ["exafs_paths", "exafs_s02", "exafs_series", "exafs_fit", "exafs_agreement", "exafs_shells"]
