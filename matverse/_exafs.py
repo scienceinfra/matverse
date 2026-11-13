@@ -115,7 +115,7 @@ class Options:
     rmax: float = 4.0
     rstep: float = 0.02
     kweights: tuple = (1, 2, 3)
-    nidp_offset: float = 2.0
+    nidp_offset: float = 2.0   # Stern 1993; Larch feffit uses 1 (chi^2 / error normalisation only)
     n_bounds: dict = field(default_factory=lambda: {"ss": (0.2, 12.0), "ms": (0.5, 48.0)})
     dr_max: dict = field(default_factory=lambda: {"ss": 0.12, "ms": 0.30})
     s2_bounds: tuple = (0.0010, 0.0250)
@@ -611,7 +611,11 @@ def bic(fit, n_idp, lib, scale=1.0):
 
 
 def supported(fit, n_idp, lib, opt):
-    return n_params(fit, lib) <= n_idp - opt.nyquist_margin
+    """Degrees-of-freedom rule: a complete model keeps ``nyquist_margin``
+    independent points free. The count here is always Stern's
+    ``2 dk dR / pi + 2``, whatever offset normalises chi^2 (``nidp_offset``
+    only changes the error / chi^2 convention, not which models are allowed)."""
+    return n_params(fit, lib) <= (n_idp - opt.nidp_offset + 2.0) - opt.nyquist_margin
 
 
 def signature(fit, lib):
