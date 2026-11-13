@@ -44,6 +44,7 @@ implements that decision as a stated procedure:
 | which shells, and what are N, R, sigma^2 with honest errors — for a whole series? | `mv.exp.exafs_series` |
 | does this particular model fit, and how well? | `mv.exp.exafs_fit`, `mv.exp.exafs_agreement` |
 | what are the shells (paths of one family merged)? | `mv.exp.exafs_shells` |
+| paths from a structure; chi(k) from mu(E) | `mv.exp.exafs_feff_paths`, `mv.exp.exafs_chi` (xraylarch) |
 
 The forward model is Larch's `FeffPathGroup` with linear interpolation of the
 `feff.dat` columns ([Newville 2013](https://doi.org/10.1088/1742-6596/430/1/012007));
@@ -271,6 +272,42 @@ for sid, ax in zip(("P1", "P3"), axes):
     ax.set(xlabel="R (A, not phase-corrected)", ylabel="|FT[k^2 chi]|", title=sid)
     ax.legend()
 fig.tight_layout()"""),
+
+    ("markdown", """\
+## Real inputs: paths from a structure, chi(k) from mu(E)
+
+Two Larch steps sit in front of everything above.
+
+`mv.exp.exafs_feff_paths` writes the FEFF input for one absorber in a
+crystal structure (Larch's `structure2feffinp`), runs the FEFF6L that ships
+with xraylarch, and returns a catalogue in the layout `exafs_paths` reads —
+with the group set to the scatterer family, so standards from different
+compounds that describe the same kind of neighbour share a group.
+Catalogues of several structures are concatenated.
+
+`mv.exp.exafs_chi` normalises a measured `mu(E)` (`pre_edge`) and removes the
+background with AUTOBK, returning `chi(k)` on a uniform grid and a per-point
+noise estimate from the high-R transform. Calibrate the energy axis against
+the foil first."""),
+
+    ("code", """\
+try:
+    from pymatgen.core import Lattice, Structure
+    bcc = Structure.from_spacegroup("Im-3m", Lattice.cubic(2.8665), ["Fe"], [[0, 0, 0]])
+    cat = mv.exp.exafs_feff_paths(bcc, "Fe", work / "feff_bcc", compound="bcc_Fe",
+                                  cluster_size=5.0, rmax=4.2)
+    display(cat[["path_id", "group", "scatterers", "nleg", "degeneracy", "reff_angstrom", "amp_ratio"]])
+
+    e0 = 7112.0
+    energy = np.arange(e0 - 200, e0 + 800, 0.5)
+    kk = np.sqrt(np.clip(energy - e0, 0, None) * X.ETOK)
+    chi_true = X.path_chi(np.maximum(kk, 0.05), lib.paths["O_ox"], 6.0, 2.03, 0.006, 0.0, S02_TRUE) * (energy > e0 + 5)
+    step = 0.5 + np.arctan((energy - e0) / 2.0) / np.pi
+    mu = 0.1 - 1e-5 * (energy - e0) + step * (1 - 1e-4 * np.clip(energy - e0, 0, None)) * (1 + chi_true)
+    ext = mv.exp.exafs_chi(energy, mu, e0=e0, rbkg=1.0)
+    print(f"E0 = {ext['e0']:.1f} eV, edge step {ext['edge_step']:.3f}, noise ~ {ext['sigma'][0]:.1e}")
+except ImportError as exc:
+    print("xraylarch not installed:", exc)"""),
 
     ("markdown", """\
 ## Pitfalls

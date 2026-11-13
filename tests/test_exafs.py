@@ -206,3 +206,32 @@ class TestSeries:
             assert res["samples"][sid]["agreement"]["rspace"] < 0.1
         assert (tab.groupby("sample_id").delta_e0_ev.nunique() == 1).all()
         assert (tab[[c for c in tab.columns if c.endswith("_err")]] >= 0).all().all()
+
+
+class TestLarchBridges:
+    def test_feff_paths_from_structure(self, tmp_path):
+        pytest.importorskip("larch.xafs.feffrunner")
+        from pymatgen.core import Lattice, Structure
+        s = Structure.from_spacegroup("Im-3m", Lattice.cubic(2.8665), ["Fe"], [[0, 0, 0]])
+        cat = mv.exp.exafs_feff_paths(s, "Fe", tmp_path / "bcc", compound="bcc", cluster_size=5.0, rmax=4.2)
+        first = cat.sort_values("reff_angstrom").iloc[0]
+        assert first.degeneracy == 8.0 and first.nleg == 2 and first.scatterers == "Fe"
+        assert first.reff_angstrom == pytest.approx(2.8665 * 3 ** 0.5 / 2, abs=2e-3)
+        assert (cat.nleg > 2).any() and set(cat.group) >= {"Fe-Fe", "Fe-Fe-ms"}
+        lib = mv.exp.exafs_paths(cat, foil_compound="bcc")
+        assert [b[0][0] for b in lib.bundles] == [first.path_id]
+
+    def test_chi_from_mu(self, library):
+        pytest.importorskip("larch.xafs")
+        e0 = 7112.0
+        energy = np.arange(e0 - 200, e0 + 900, 0.5)
+        kk = np.sqrt(np.clip(energy - e0, 0, None) * X.ETOK)
+        truth = [("O_ox", 6.0, 2.03, 0.006)]
+        chi_true = _chi(library, truth, k=np.maximum(kk, 0.05)) * (energy > e0 + 5)
+        step = 0.5 + np.arctan((energy - e0) / 2.0) / np.pi
+        mu = 0.1 - 1e-5 * (energy - e0) + step * (1.0 - 1e-4 * np.clip(energy - e0, 0, None)) * (1 + chi_true)
+        s = mv.exp.exafs_chi(energy, mu, e0=e0, rbkg=1.0)
+        sel = (s["k"] >= 3) & (s["k"] <= 12)
+        ref = _chi(library, truth, k=s["k"][sel])
+        assert np.corrcoef(s["chi"][sel] * s["k"][sel] ** 2, ref * s["k"][sel] ** 2)[0, 1] > 0.95
+        assert np.allclose(np.diff(s["k"]), 0.05)

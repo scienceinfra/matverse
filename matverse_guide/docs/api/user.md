@@ -12,7 +12,7 @@ agent. Every entry names the state it reads and the state it writes, and each of
 those claims is verified by execution in `tests/test_contracts.py` rather than
 asserted.
 
-Public registry entries listed here: 288
+Public registry entries listed here: 290
 
 Look a function up by intent rather than by name:
 
@@ -337,6 +337,8 @@ Measured data, carried as a level of theory like any other.
 
    exp.attach
    exp.exafs_agreement
+   exp.exafs_chi
+   exp.exafs_feff_paths
    exp.exafs_fit
    exp.exafs_paths
    exp.exafs_s02

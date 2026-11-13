@@ -1074,3 +1074,119 @@ def exafs_shells(table, paths, *, link: float = 0.25):
 
 
 __all__ += ["exafs_paths", "exafs_s02", "exafs_series", "exafs_fit", "exafs_agreement", "exafs_shells"]
+
+
+@register_function(
+    aliases=["feff paths from structure", "run feff6", "feff6l", "cif to feff",
+             "generate exafs paths", "scattering paths from cif"],
+    category="exp",
+    description="Scattering paths of one absorber in a crystal structure: "
+                "writes the FEFF input from the structure (Larch "
+                "structure2feffinp), runs FEFF6L (bundled with xraylarch) and "
+                "returns a path catalog (path_id, file, group, scatterers, "
+                "nleg, degeneracy, reff_angstrom, source_compound, "
+                "amplitude ratio) that mv.exp.exafs_paths reads.",
+    examples=["cat = mv.exp.exafs_feff_paths('FeO.cif', 'Fe', 'feff/FeO', compound='FeO', rmax=4.5)",
+              "lib = mv.exp.exafs_paths(pd.concat([cat_a, cat_b]), foil_compound='Fe_bcc')"],
+    related=["mv.exp.exafs_paths", "mv.exp.exafs_series"],
+    notes="Needs xraylarch (feff6l executable ships with it) and pymatgen. "
+          "group defaults to the scatterer element(s) plus '-ms' for multiple "
+          "scattering, so standards of one chemical family from different "
+          "compounds share a group; pass group_fn(row) -> str for another "
+          "convention. Paths with an amplitude ratio below min_amp (% of the "
+          "strongest) or more than max_nleg legs are dropped. For several "
+          "inequivalent absorber sites run once per site (absorber_site) and "
+          "weight them yourself.",
+)
+def exafs_feff_paths(structure, absorber: str, folder, *, compound: str | None = None,
+                     edge: str | None = None, cluster_size: float = 6.0, rmax: float | None = None,
+                     min_amp: float = 4.0, max_nleg: int = 3, absorber_site: int = 1,
+                     fmt: str = "cif", group_fn=None):
+    """Run FEFF6L on a structure and return its path catalog (DataFrame)."""
+    from pathlib import Path as _P
+    import pandas as pd
+    from . import _exafs as X
+    try:
+        from larch.xrd.structure2feff import structure2feffinp
+        from larch.xafs.feffrunner import feff6l
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("mv.exp.exafs_feff_paths needs xraylarch (pip install xraylarch)") from exc
+    text = structure
+    if hasattr(structure, "to") and not isinstance(structure, (str, _P)):
+        text, fmt = structure.to(fmt="cif"), "cif"
+    elif isinstance(structure, _P) or (isinstance(structure, str) and "\n" not in structure
+                                       and _P(structure).exists()):
+        text = _P(structure).read_text()
+    folder = _P(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    inp = structure2feffinp(text, absorber, edge=edge, cluster_size=cluster_size,
+                            absorber_site=absorber_site, version8=False, fmt=fmt)
+    if inp.startswith("#"):
+        raise ValueError(f"could not read the structure: {inp}")
+    (folder / "feff.inp").write_text(inp)
+    feff6l(folder=str(folder), feffinp="feff.inp", verbose=False)
+    comp = compound or folder.name
+    rows = []
+    for line in (folder / "files.dat").read_text().splitlines():
+        parts = line.split()
+        if len(parts) != 6 or not parts[0].startswith("feff") or not parts[0].endswith(".dat"):
+            continue
+        fname, _sig2, amp, deg, nleg, reff = parts
+        amp, deg, nleg, reff = float(amp), float(deg), int(nleg), float(reff)
+        if amp < min_amp or nleg > max_nleg or (rmax is not None and reff > rmax):
+            continue
+        p = X.read_feffdat(folder / fname)
+        atoms = p.get("atoms") or []
+        legs = [a for a in atoms[1:]] if len(atoms) > 1 else ["X"]
+        sc = "-".join(dict.fromkeys(legs)) if nleg > 2 else legs[0]
+        row = {"path_id": f"{comp}_{fname[4:8]}", "file": str((folder / fname).resolve()),
+               "group": None, "scatterers": sc, "nleg": nleg, "degeneracy": deg,
+               "reff_angstrom": reff, "source_compound": comp, "amp_ratio": amp}
+        row["group"] = group_fn(row) if group_fn else (f"{absorber}-{sc}" + ("-ms" if nleg > 2 else ""))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@register_function(
+    aliases=["chi(k) from mu(E)", "exafs background removal", "autobk", "extract exafs",
+             "normalize xas and extract chi"],
+    category="exp",
+    description="chi(k) from a measured absorption spectrum mu(E) with "
+                "xraylarch: pre_edge normalization and AUTOBK background "
+                "removal (rbkg), on a uniform k grid, with a per-point noise "
+                "estimate from the high-R Fourier transform — the input "
+                "mv.exp.exafs_series expects.",
+    examples=["s = mv.exp.exafs_chi(energy, mu, rbkg=1.0)",
+              "spectra = {name: mv.exp.exafs_chi(e, m) for name, (e, m) in raw.items()}"],
+    related=["mv.exp.exafs_series", "mv.exp.exafs_s02"],
+    notes="Calibrate the energy axis against the simultaneously measured foil "
+          "first (see the xas-exafs-analysis skill). rbkg about half the "
+          "first-shell distance; e0 None = derivative maximum. Returned dict: "
+          "k, chi, sigma, observed, e0, edge_step.",
+)
+def exafs_chi(energy, mu, *, e0: float | None = None, rbkg: float = 1.0, kweight: float = 2,
+              kmax: float | None = None, kstep: float = 0.05, pre1=None, pre2=None,
+              norm1=None, norm2=None, nnorm=None, k_noise_min: float = 3.0):
+    """Normalize mu(E), remove the background, return chi(k) and its noise."""
+    from . import _exafs as X
+    try:
+        from larch import Group
+        from larch.xafs import autobk, pre_edge
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("mv.exp.exafs_chi needs xraylarch (pip install xraylarch)") from exc
+    e = np.asarray(energy, float)
+    m = np.asarray(mu, float)
+    order = np.argsort(e)
+    g = Group(energy=e[order], mu=m[order])
+    kws = {k: v for k, v in dict(pre1=pre1, pre2=pre2, norm1=norm1, norm2=norm2, nnorm=nnorm).items()
+           if v is not None}
+    pre_edge(g, e0=e0, **kws)
+    autobk(g, rbkg=rbkg, kweight=kweight, kmax=kmax, kstep=kstep, e0=g.e0)
+    k = np.round(np.asarray(g.k, float), 6)
+    chi = np.asarray(g.chi, float)
+    sigma = X.estimate_sigma(k, chi, kmin=k_noise_min, kweight=int(kweight))
+    return {"k": k, "chi": chi, "sigma": sigma, "observed": np.isfinite(chi),
+            "e0": float(g.e0), "edge_step": float(g.edge_step)}
+
+
+__all__ += ["exafs_feff_paths", "exafs_chi"]
