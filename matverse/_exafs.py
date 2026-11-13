@@ -1365,7 +1365,27 @@ def write_feffdat(path, p, title="synthetic", absorber="X", scatterer="Y"):
 
 
 # --------------------------------------------------------------------- whole campaign
+def _blas_limit(n=1):
+    """Single-threaded BLAS inside the fits: the transforms are small
+    matrix-vector products, and threaded BLAS in several worker processes on a
+    few CPUs only oversubscribes them (no-op without threadpoolctl)."""
+    try:
+        from threadpoolctl import threadpool_limits
+        return threadpool_limits(limits=n)
+    except Exception:  # pragma: no cover
+        import contextlib
+        return contextlib.nullcontext()
+
+
 def campaign(lib, spectra, opt: Options, s02, n_jobs=1, series=True, log=print):
+    """See _campaign; runs with single-threaded BLAS and at most one worker
+    per CPU this process may use."""
+    n_jobs = max(1, min(int(n_jobs), available_cpus()))
+    with _blas_limit(1):
+        return _campaign(lib, spectra, opt, s02, n_jobs=n_jobs, series=series, log=log)
+
+
+def _campaign(lib, spectra, opt: Options, s02, n_jobs=1, series=True, log=print):
     """Shell selection for every spectrum, then the series reading.
 
     Returns ``(rows, info)``: rows ``(sid, path_id, N, dN, R, dR, s2, ds2, e0,
