@@ -12,7 +12,7 @@ agent. Every entry names the state it reads and the state it writes, and each of
 those claims is verified by execution in `tests/test_contracts.py` rather than
 asserted.
 
-Public registry entries listed here: 278
+Public registry entries listed here: 290
 
 Look a function up by intent rather than by name:
 
@@ -336,6 +336,14 @@ Measured data, carried as a level of theory like any other.
    :nosignatures:
 
    exp.attach
+   exp.exafs_agreement
+   exp.exafs_chi
+   exp.exafs_feff_paths
+   exp.exafs_fit
+   exp.exafs_paths
+   exp.exafs_s02
+   exp.exafs_series
+   exp.exafs_shells
    exp.fit_pattern
    exp.formation_hull
    exp.match_xrd
@@ -584,6 +592,20 @@ Units, checkpointing, cluster submission and object summaries.
    indent.segment
    indent.unload_discontinuity
    indent.zero_point
+```
+
+
+## mech
+
+```{eval-rst}
+.. autosummary::
+   :toctree: reference/
+   :nosignatures:
+
+   mech.bracket_fold
+   mech.check_gradient
+   mech.cleavage_energies
+   mech.elastic_constants
 ```
 
 

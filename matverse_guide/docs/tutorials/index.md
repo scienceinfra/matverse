@@ -164,6 +164,14 @@ Griffith load, audited derivatives, and bracketing a lattice-trapping fold.
 Weight fractions from powder diffraction — internal standards, standard
 addition, bulk chemistry, and the amorphous fraction none of them sees alone.
 :::
+
+:::{grid-item-card} EXAFS shell analysis {octicon}`pulse;1em;`
+:link: exafs
+:link-type: doc
+
+S0² from the foil, the shells the data support chosen from a FEFF path
+catalogue by stated tests, honest errors, and site fractions from a series.
+:::
 ::::
 
 ## Plumbing
@@ -245,6 +253,7 @@ molecules
 indentation
 fracture
 phase_quantification
+exafs
 from_pymatgen
 data_io
 infrastructure
