@@ -105,4 +105,23 @@ for t, l, P in held:
 t, l, P = held[0]
 plt.plot(l, P, 'k', lw=2, label='truth'); plt.plot(l, mv.consti.simulate(fit['model'], t, l), 'C1--', label='fitted model')
 plt.xlabel('stretch'); plt.ylabel('nominal stress (MPa)'); plt.legend(); plt.show()"""),
+
+    ("markdown", """\
+## 3. Settle a borderline label by prediction
+
+When a diagnostic is near its threshold, fit the competing families on the calibration
+protocols and let unseen protocols decide (here: linear vs stress-thinning viscosity for B,
+validated on oscillation tests)."""),
+
+    ("code", """\
+relaxB, recB, oscB, rateB = battery(B)
+trainB = rateB + relaxB[1:2]
+validB = [oscB[(1.0, 0.02)], oscB[(1.0, 0.15)], oscB[(4.0, 0.15)]]
+cands = {'linear viscosity': {'hyper': ['neo_hookean', {'mu': .3}], 'branches': [{'mu': .5, 'tau': 1.}]},
+         'stress-thinning': {'hyper': ['neo_hookean', {'mu': .3}],
+                             'branches': [{'mu': .5, 'tau': 1., 'K2': 50., 'beta': 1., 'eta_inf': .05}]}}
+cmp = mv.consti.compare_models(trainB, validB, cands, max_points=250)
+for name, mean_v, max_v, train_max in cmp['table']:
+    print(f'{name:18s} validation mean {mean_v:.4f} max {max_v:.4f} | train max {train_max:.4f}')
+print('best:', cmp['best'])"""),
 ]
