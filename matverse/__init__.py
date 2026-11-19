@@ -30,6 +30,9 @@ Namespaces
 ``mv.dft``     first-principles inputs out, results back in
 ``mv.multi``   the sites axis — one row per atom
 ``mv.exp``     measured data, on the same footing as computed data
+``mv.consti``  finite-strain inelastic constitutive models of soft solids from uniaxial
+               tests: hyperelastic, QLV/Prony, Reese-Govindjee (stress-thinning viscosity),
+               Ogden-Roxburgh Mullins; calibration; separability / Mullins / Payne diagnostics
 ``mv.indent``  instrumented nanoindentation: load-displacement curves to E, H,
                toughness, creep law, pop-in and adhesion, artifacts corrected
 ``mv.gen``     scoring generated candidates
@@ -64,7 +67,7 @@ creates::
 from __future__ import annotations
 
 from . import (calc, data, datasets, dft, disorder, elec,  # noqa: F401
-               elements, env, exp, feat, gen, iface, indent, mag, md, mech,
+               consti, elements, env, exp, feat, gen, iface, indent, mag, md, mech,
                mol, model, multi,
                neb, opt, pl, pp, prop, screen, struct, surf, thermo, tl,
                transform, utils)
@@ -98,7 +101,7 @@ __all__ = [
     "data", "pp", "feat", "tl", "calc", "prop", "thermo", "screen", "exp",
     "multi", "gen", "pl", "model", "opt", "utils", "dft",
     "md", "neb", "surf", "mag", "datasets",
-    "disorder", "elec", "elements", "env", "iface", "struct",
+    "disorder", "elec", "consti", "elements", "env", "iface", "struct",
     "mol", "transform",
     "new", "structures", "variants", "provenance", "compare_levels",
     "levels_used", "level_info", "set_level", "records",

@@ -33,6 +33,7 @@ NOTEBOOKS = [
     "from_pymatgen",
     "molecules",
     "indentation",
+    "constitutive_modelling",
     "fracture",
     "phase_quantification",
     "exafs",
